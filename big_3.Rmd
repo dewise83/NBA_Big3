@@ -1,0 +1,167 @@
+---
+title: "Scraping and Assessing NBA PER"
+author: "Dean Wise"
+date: "8/11/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+needs(XML, tidyverse, xml2, rvest, plotly, DT)
+per_table <- read_csv("~/Desktop/R Scripts/Personal/NBA Big 3/per_table.csv")
+```
+
+## Pulling Basketball Reference Data
+
+Basketball Reference is a great source of NBA data that can be easily pulled from online. For example, to look at advanced metrics for the Cleveleland Cavs in 1990, you could follow this link: https://www.basketball-reference.com/teams/CLE/1990.html#advanced::none 
+
+In order to access the html code behind this table, you can access this link: http://widgets.sports-reference.com/wg.fcgi?css=1&site=bbr&url=%2Fteams%2FCLE%2F1990.html&div=div_advanced
+
+Through R, you can scrape this data via the following code:
+```{r scrape_demo}
+needs(XML, tidyverse, xml2, rvest, plotly, DT)
+
+url <- "http://widgets.sports-reference.com/wg.fcgi?css=1&site=bbr&url=%2Fteams%2FCLE%2F1990.html&div=div_advanced"
+node <- read_html(url) %>% 
+  html_node("table")
+table <- html_table(node, header = TRUE)
+datatable(table)
+
+```
+
+***
+
+## Which NBA Teams had the most dominant "Big 3"?
+
+To pull historical PER, we can use the above url, and tweak it slightly to adjust the team and the year. 
+
+```{r build_url}
+teams <- c("NYK", "BOS", "TOR", "PHI", "BRK", "CLE", "MIL", "IND", "CHI", "DET", "WAS", "ATL", "MIA", "CHO", "ORL", "UTA", "OKC", 
+           "POR", "DEN", "MIN", "GSW", "LAC", "SAC", "LAL", "PHO", "SAS", "HOU", "MEM", "NOP", "DAL", "WSB", "NJN", "KCK", "SDC", 
+           "SEA", "CHH", "VAN")
+years <- seq(1980, 2017, by = 1)
+url <- c()
+tick <- 1
+for (year in years) {
+  for (team in teams){
+    url[tick] <- paste0("http://widgets.sports-reference.com/wg.fcgi?css=1&site=bbr&url=%2Fteams%2F", team, "%2F", as.character(year), ".html&div=div_advanced")
+    tick <- tick +1
+  }
+}
+
+#Show the first 5 as an example
+url[1:5]
+```
+
+
+We now have an extensive list of all NBA teams and years from 1980 onward. We can now create a function to scrape the data for all of the different URLs (scrape). We are also going to create another function (per) that will format the data in a way to look at specifically how to measure each team's "Big 3", by filtering to players with a minimum of 40 games and 1000 minutes throughout the season. 
+
+```{r scrape_fun}
+scrape <- function(x) {
+  node <- read_html(x) %>% 
+    html_node("table")
+  if (is.na(node) == FALSE) {
+    table <- data.frame(html_table(node, header = TRUE))
+    table$Year <- as.integer(substr(x, 81, 84))
+    table$Team <- substr(x, 75, 77)
+    return(table)
+  }
+}
+
+
+per <- function(x) {
+  if(is.null(x) == FALSE){
+    x <- x %>%
+      select(Var.2, Age, Team, Year, G, MP, PER) %>% 
+      arrange(desc(PER)) %>% 
+      filter(G > 40 & MP >1000) %>% 
+      head(3)
+  }
+}
+
+```
+
+
+Lets run these function onto our URLs and generate a historical table:
+
+```{r fake_run, eval=FALSE}
+
+per_table <- url %>% 
+  map(scrape) %>% 
+  map(per) %>% 
+  bind_rows()
+
+
+```
+
+Lets look at the table we built:
+
+```{r show_per}
+names(per_table)[1] <- "Player"
+datatable(per_table)
+```
+
+***
+We have successfully gathered each teams top 3 players in terms of PER from each season. If we reformat the data a bit, we can get a nice layout that will be easy to plot. 
+Note that some of these tables are optional but can all serve as interesting assessments of the data
+```{r clean_per}
+#Get a rolled up table by total PER for each team
+total_per <- per_table %>% 
+  group_by(Team, Year) %>% 
+  summarise(Total_PER = sum(PER), 
+            Median_PER = median(PER)) %>% 
+  arrange(desc(Total_PER))
+
+#Get a clean aggregation table for each team/season that rolls up total PER for its three players and then ranks them
+rank <- per_table %>% 
+  group_by(Team, Year) %>% 
+  summarise(Total_PER = sum(PER), 
+            Median_PER = median(PER)) %>% 
+  arrange(desc(Total_PER)) %>% 
+  select(Team, Year) %>% 
+  bind_cols(tibble(Rank = c(1:1023)))
+
+#Bring in the totals for each row
+big3 <- per_table %>% 
+  inner_join(rank, by = c("Team", "Year")) %>% 
+  arrange(Rank, desc(PER))
+
+#get the number of teams+years
+team_count <- nrow(big3)/3
+
+#Spread the table for player names
+wide_players <- big3 %>% 
+  select(Team, Year, Player) %>% 
+  bind_cols(tibble(Player_Bucket = rep(c("Player1", "Player2", "Player3"), team_count))) %>% 
+  spread(Player_Bucket, Player)
+
+#Spread the table for player PER
+wide_per <- big3 %>% 
+  select(Team, Year, PER) %>% 
+  bind_cols(tibble(PER_Bucket = rep(c("PER1", "PER2", "PER3"), team_count))) %>% 
+  spread(PER_Bucket, PER)
+
+#Create a wide table that has a column of all of the players within the total PER
+wide_total <- wide_players %>% 
+  left_join(wide_per, by = c("Team", "Year")) %>% 
+  mutate(Big3 = paste0(Player1, " (", PER1, "), ", Player2, " (", PER2, "), ", Player3, " (", PER3, ")" )) %>% 
+  select(Team, Year, Big3) %>% 
+  left_join(total_per, by = c("Team", "Year")) %>% 
+  select(-Median_PER)
+
+datatable(wide_total)
+
+
+```
+
+
+***
+Let's plot these teams. You can toggle teams to be on and off display by clicking on the legend and selecting/deselecting teams. I recommend you remove  all teams (slightly tedious) and then add in individual ones. You can hover over and look at different combos of players. For example, you could look at the effects Lebron has had on his teams by selecting only the Heat and Cavs. 
+
+```{r plot, message=FALSE, warning=FALSE}
+
+p <- plot_ly(wide_total, x = ~Year, y = ~Total_PER, name = ~Team, mode = "lines+markers", text = ~paste(Team, Big3), color = ~Team, width = 1100, height = 800)
+p
+
+```
+
